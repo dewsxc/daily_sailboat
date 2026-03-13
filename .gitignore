@@ -1,0 +1,6 @@
+secret.yml
+*.db
+venv/
+__pycache__/
+*.log
+.venv/
