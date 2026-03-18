@@ -285,9 +285,9 @@ def main():
         analysis_type = "daily_test"
         print("測試模式：分析過去24小時的對話紀錄")
     elif is_saturday:
-        # 週報：上週日 01:00 ～ 今天（週六）01:00，共 7 天
+        # 週報：上週六 01:00 ～ 今天（週六）01:00，共 7 天
         end_of_period = today_01
-        start_of_period = today_01 - datetime.timedelta(days=6)
+        start_of_period = today_01 - datetime.timedelta(days=7)
         analysis_type = "weekly"
     else:
         # 日報：昨天 01:00 ～ 今天 01:00
