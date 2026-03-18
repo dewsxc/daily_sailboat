@@ -4,8 +4,6 @@ import yaml
 import requests
 import datetime
 import argparse
-import anthropic
-import google.generativeai as genai
 from pathlib import Path
 
 # --- Configuration ---
@@ -13,7 +11,13 @@ BASE_DIR = Path(__file__).parent
 SECRET_FILE = BASE_DIR / "secret.yml"
 DB_FILE = BASE_DIR / "chat_history.db"
 
-CLAUDE_MODEL = "claude-opus-4-6"
+MODEL_MAP = {
+    "gemini":  "gemini-3.1-pro-preview",
+    "sonnet":  "claude-sonnet-4-6",
+    "claude":  "claude-sonnet-4-6",
+    "opus":    "claude-opus-4-6",
+}
+DEFAULT_MODEL = "sonnet"
 
 def load_config():
     if not SECRET_FILE.exists():
@@ -159,6 +163,7 @@ def send_message(text):
 
 # --- Gemini API ---
 def analyze_with_gemini(content, is_weekly=False):
+    import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
@@ -196,7 +201,10 @@ def analyze_with_gemini(content, is_weekly=False):
         return f"Gemini SDK 分析出錯: {e}"
 
 # --- Claude API ---
-def analyze_with_claude(content, is_weekly=False):
+def analyze_with_claude(content, is_weekly=False, model=None):
+    import anthropic
+    if model is None:
+        model = MODEL_MAP[DEFAULT_MODEL]
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     title = "每週交易心理與諮商總結" if is_weekly else "每日交易心理與諮商分析"
@@ -222,7 +230,7 @@ def analyze_with_claude(content, is_weekly=False):
 
     try:
         with client.messages.stream(
-            model=CLAUDE_MODEL,
+            model=model,
             max_tokens=64000,
             thinking={"type": "adaptive"},
             messages=[{"role": "user", "content": prompt}]
@@ -249,6 +257,12 @@ def main():
         "-t", "--test",
         action="store_true",
         help="測試模式：提取當下到前一天（過去24小時）的對話紀錄進行分析"
+    )
+    parser.add_argument(
+        "-m", "--model",
+        choices=list(MODEL_MAP.keys()),
+        default=DEFAULT_MODEL,
+        help=f"選擇 AI 模型（預設：{DEFAULT_MODEL}）。選項：{', '.join(f'{k}={v}' for k, v in MODEL_MAP.items())}"
     )
     args = parser.parse_args()
 
@@ -308,15 +322,18 @@ def main():
 
     formatted_content = "\n".join(content_lines)
 
-    # 4. Analyze with Claude
-    print(f"使用模型 {CLAUDE_MODEL} 進行分析...")
-    analysis_result = analyze_with_claude(formatted_content, is_weekly=is_saturday)
+    # 4. Analyze
+    model_id = MODEL_MAP[args.model]
+    print(f"使用模型 {model_id} 進行分析...")
+    if args.model == "gemini":
+        analysis_result = analyze_with_gemini(formatted_content, is_weekly=is_saturday)
+    else:
+        analysis_result = analyze_with_claude(formatted_content, is_weekly=is_saturday, model=model_id)
     print(f"分析完成，結果長度：{len(analysis_result)} 字")
-    print(f"--- 分析結果預覽（前200字）---\n{analysis_result[:200]}\n---")
 
     # 5. Save analysis to database
-    save_analysis(conn, analysis_type, CLAUDE_MODEL, analysis_result, start_ts, end_ts)
-    print(f"分析結果已儲存至資料庫（模型：{CLAUDE_MODEL}，類型：{analysis_type}）")
+    save_analysis(conn, analysis_type, model_id, analysis_result, start_ts, end_ts)
+    print(f"分析結果已儲存至資料庫（模型：{model_id}，類型：{analysis_type}）")
 
     # 6. Send back to Telegram
     send_message(analysis_result)
