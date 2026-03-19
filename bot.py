@@ -4,6 +4,7 @@ import yaml
 import requests
 import datetime
 import argparse
+import time
 from pathlib import Path
 
 # --- Configuration ---
@@ -31,6 +32,47 @@ TG_TOKEN = config.get("telegram_bot_token")
 TG_CHAT_ID = str(config.get("telegram_chat_id"))
 GEMINI_API_KEY = config.get("gemini_api_key")
 ANTHROPIC_API_KEY = config.get("anthropic_api_key")
+
+# --- Retry helper ---
+_TG_NETWORK_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+def _retry(func, label, retryable_errors, max_retries=3):
+    """Call func(), retrying on retryable_errors with exponential backoff."""
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func()
+        except retryable_errors as e:
+            last_error = e
+            wait = 2 ** attempt
+            print(f"{label} 網路錯誤（第 {attempt}/{max_retries} 次）：{e}，{wait} 秒後重試...")
+            time.sleep(wait)
+    raise last_error
+
+PROMPT = """
+你是一位富有同理心的心理諮商師，同時具備深厚的交易心理學知識。
+以下是來自用戶的語音紀錄（按時間順序排列）。
+
+1. 請將語音紀錄內容精煉，以簡短不失原意的描述表達，條列出所有內容
+2. 請針對這些紀錄進行深度分析，區分生活與交易兩個面向：
+- **生活面**：辨識用戶的認知模式、情緒狀態與心理健康狀況，指出相關心理學現象（如認知扭曲、習得性無助、迴避行為等）。
+- **交易面**：辨識情緒波動、認知偏差（如確認偏誤、損失厭惡、過度自信）、焦慮或衝動決策等現象。
+
+**最重要的核心任務**：以助人者的身份，幫助用戶突破心理障礙、解開行動阻力。
+請具體指出是什麼心理機制阻礙了用戶採取積極行動，並提供可立即執行的具體建議，
+引導用戶從「知道」走向「做到」，展開積極且有建設性的行動。
+
+請以繁體中文撰寫一份{}，語氣溫暖、直接且具有行動導向。
+
+對話紀錄內容：
+---
+{}
+---
+"""
 
 # --- Database ---
 def init_db():
@@ -84,7 +126,10 @@ def fetch_updates(conn):
         params["offset"] = last_update_id + 1
 
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = _retry(
+            lambda: requests.get(url, params=params, timeout=10),
+            "Telegram getUpdates", _TG_NETWORK_ERRORS
+        )
         response.raise_for_status()
         data = response.json()
         updates = data.get("result", [])
@@ -144,7 +189,10 @@ def send_message(text):
             "parse_mode": "HTML"
         }
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = _retry(
+                lambda: requests.post(url, json=payload, timeout=30),
+                f"Telegram sendMessage {idx}", _TG_NETWORK_ERRORS
+            )
             data = resp.json()
             if data.get("ok"):
                 print(f"  訊息 {idx}/{len(chunks)} 傳送成功")
@@ -152,7 +200,10 @@ def send_message(text):
                 print(f"  訊息 {idx}/{len(chunks)} 傳送失敗：{data.get('description', '未知錯誤')}")
                 # Retry without parse_mode in case of HTML formatting error
                 payload["parse_mode"] = ""
-                resp2 = requests.post(url, json=payload, timeout=30)
+                resp2 = _retry(
+                    lambda: requests.post(url, json=payload, timeout=30),
+                    f"Telegram sendMessage {idx} (純文字)", _TG_NETWORK_ERRORS
+                )
                 data2 = resp2.json()
                 if data2.get("ok"):
                     print(f"  訊息 {idx}/{len(chunks)} 重試（純文字）成功")
@@ -162,93 +213,89 @@ def send_message(text):
             print(f"  訊息 {idx}/{len(chunks)} 傳送例外：{e}")
 
 # --- Gemini API ---
-def analyze_with_gemini(content, is_weekly=False):
+def analyze_with_gemini(content, is_weekly=False, max_retries=3):
     import google.generativeai as genai
+    import google.api_core.exceptions as google_exc
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
     title = "每週交易心理與諮商總結" if is_weekly else "每日交易心理與諮商分析"
-    prompt = f"""
-你是一位富有同理心的心理諮商師，同時具備深厚的交易心理學知識。
-以下是來自用戶的對話紀錄（按時間順序排列）。
+    prompt = PROMPT.format(title, content)
 
-請針對這些對話進行深度分析，區分生活與交易兩個面向：
-- **生活面**：辨識用戶的認知模式、情緒狀態與心理健康狀況，指出相關心理學現象（如認知扭曲、習得性無助、迴避行為等）。
-- **交易面**：辨識情緒波動、認知偏差（如確認偏誤、損失厭惡、過度自信）、焦慮或衝動決策等現象。
+    _GEMINI_NETWORK_ERRORS = (
+        google_exc.ServiceUnavailable,
+        google_exc.DeadlineExceeded,
+        google_exc.InternalServerError,
+    )
 
-**最重要的核心任務**：以助人者的身份，幫助用戶突破心理障礙、解開行動阻力。
-請具體指出是什麼心理機制阻礙了用戶採取積極行動，並提供可立即執行的具體建議，
-引導用戶從「知道」走向「做到」，展開積極且有建設性的行動。
-
-請以繁體中文撰寫一份{title}，語氣溫暖、直接且具有行動導向。
-
-對話紀錄內容：
----
-{content}
----
-"""
-
-    try:
-        response = model.generate_content(prompt)
-        if response.candidates:
-            if response.candidates[0].content.parts:
-                return response.text
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = model.generate_content(prompt)
+            if response.candidates:
+                if response.candidates[0].content.parts:
+                    return response.text
+                else:
+                    return f"Gemini 回傳內容為空。原因可能是安全過濾或模型拒絕回答。Finish Reason: {response.candidates[0].finish_reason}"
             else:
-                return f"Gemini 回傳內容為空。原因可能是安全過濾或模型拒絕回答。Finish Reason: {response.candidates[0].finish_reason}"
-        else:
-            return "Gemini 未能生成任何候選回覆。"
-    except Exception as e:
-        return f"Gemini SDK 分析出錯: {e}"
+                return "Gemini 未能生成任何候選回覆。"
+        except _GEMINI_NETWORK_ERRORS as e:
+            last_error = e
+            wait = 2 ** attempt
+            print(f"Gemini 網路錯誤（第 {attempt}/{max_retries} 次）：{e}，{wait} 秒後重試...")
+            time.sleep(wait)
+        except Exception as e:
+            return f"Gemini SDK 分析出錯: {e}"
+
+    return f"Gemini 分析出錯（已重試 {max_retries} 次）: {last_error}"
 
 # --- Claude API ---
-def analyze_with_claude(content, is_weekly=False, model=None):
+def analyze_with_claude(content, is_weekly=False, model=None, max_retries=3):
     import anthropic
     if model is None:
         model = MODEL_MAP[DEFAULT_MODEL]
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     title = "每週交易心理與諮商總結" if is_weekly else "每日交易心理與諮商分析"
-    prompt = f"""
-你是一位富有同理心的心理諮商師，同時具備深厚的交易心理學知識。
-以下是來自用戶的對話紀錄（按時間順序排列）。
+    prompt = PROMPT.format(title, content)
 
-請針對這些對話進行深度分析，區分生活與交易兩個面向：
-- **生活面**：辨識用戶的認知模式、情緒狀態與心理健康狀況，指出相關心理學現象（如認知扭曲、習得性無助、迴避行為等）。
-- **交易面**：辨識情緒波動、認知偏差（如確認偏誤、損失厭惡、過度自信）、焦慮或衝動決策等現象。
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=64000,
+                thinking={"type": "adaptive"},
+                messages=[{"role": "user", "content": prompt}]
+            ) as stream:
+                final_message = stream.get_final_message()
 
-**最重要的核心任務**：以助人者的身份，幫助用戶突破心理障礙、解開行動阻力。
-請具體指出是什麼心理機制阻礙了用戶採取積極行動，並提供可立即執行的具體建議，
-引導用戶從「知道」走向「做到」，展開積極且有建設性的行動。
+            return next(
+                (block.text for block in final_message.content if block.type == "text"),
+                "Claude 未能生成任何回覆。"
+            )
 
-請以繁體中文撰寫一份{title}，語氣溫暖、直接且具有行動導向。
+        except (anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
+            last_error = e
+            wait = 2 ** attempt
+            print(f"Claude 網路錯誤（第 {attempt}/{max_retries} 次）：{e}，{wait} 秒後重試...")
+            time.sleep(wait)
+        except Exception as e:
+            import httpx, httpcore
+            if isinstance(e, (httpx.RemoteProtocolError, httpcore.RemoteProtocolError,
+                               httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+                last_error = e
+                wait = 2 ** attempt
+                print(f"Claude 網路錯誤（第 {attempt}/{max_retries} 次）：{e}，{wait} 秒後重試...")
+                time.sleep(wait)
+            elif isinstance(e, anthropic.AuthenticationError):
+                return "Claude API 認證失敗，請確認 anthropic_api_key 設定正確。"
+            elif isinstance(e, anthropic.APIError):
+                return f"Claude API 錯誤: {e}"
+            else:
+                return f"Claude 分析出錯: {e}"
 
-對話紀錄內容：
----
-{content}
----
-"""
-
-    try:
-        with client.messages.stream(
-            model=model,
-            max_tokens=64000,
-            thinking={"type": "adaptive"},
-            messages=[{"role": "user", "content": prompt}]
-        ) as stream:
-            final_message = stream.get_final_message()
-
-        result_text = next(
-            (block.text for block in final_message.content if block.type == "text"),
-            "Claude 未能生成任何回覆。"
-        )
-        return result_text
-
-    except anthropic.AuthenticationError:
-        return "Claude API 認證失敗，請確認 anthropic_api_key 設定正確。"
-    except anthropic.APIError as e:
-        return f"Claude API 錯誤: {e}"
-    except Exception as e:
-        return f"Claude 分析出錯: {e}"
+    return f"Claude 分析出錯（已重試 {max_retries} 次）: {last_error}"
 
 # --- Main Logic ---
 def main():
