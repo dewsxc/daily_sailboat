@@ -290,6 +290,11 @@ def analyze_with_claude(content, is_weekly=False, model=None, max_retries=3):
                 time.sleep(wait)
             elif isinstance(e, anthropic.AuthenticationError):
                 return "Claude API 認證失敗，請確認 anthropic_api_key 設定正確。"
+            elif isinstance(e, anthropic.APIStatusError) and e.status_code in (429, 529):
+                last_error = e
+                wait = 2 ** attempt
+                print(f"Claude 服務過載（第 {attempt}/{max_retries} 次）：{e}，{wait} 秒後重試...")
+                time.sleep(wait)
             elif isinstance(e, anthropic.APIError):
                 return f"Claude API 錯誤: {e}"
             else:
