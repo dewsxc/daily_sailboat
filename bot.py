@@ -53,20 +53,47 @@ def _retry(func, label, retryable_errors, max_retries=3):
             time.sleep(wait)
     raise last_error
 
-PROMPT = """
-你是一位富有同理心的心理諮商師，同時具備深厚的交易心理學知識。
-以下是來自用戶的語音紀錄（按時間順序排列）。
+DAILY_PROMPT = """
+你是一位富有同理心的心理諮商師與思緒整理者，具備深厚的心理學與交易心理知識。
+以下是來自用戶今天的語音紀錄（按時間順序排列）。
 
-1. 請將語音紀錄內容精煉，以簡短不失原意的描述表達，條列出所有內容
-2. 請針對這些紀錄進行深度分析，區分生活與交易兩個面向：
-- **生活面**：辨識用戶的認知模式、情緒狀態與心理健康狀況，指出相關心理學現象（如認知扭曲、習得性無助、迴避行為等）。
-- **交易面**：辨識情緒波動、認知偏差（如確認偏誤、損失厭惡、過度自信）、焦慮或衝動決策等現象。
+**定位說明**：
+這是一份「每日思緒整理」。由於使用者的紀錄可能只是當下的情緒抒發、碎唸或還在成形中的想法，
+你的任務是「擔任一面鏡子」，客觀、溫暖地反映使用者今天的狀態，不需要急著給出結論或強烈的行動指引。
 
-**最重要的核心任務**：以助人者的身份，幫助用戶突破心理障礙、解開行動阻力。
-請具體指出是什麼心理機制阻礙了用戶採取積極行動，並提供可立即執行的具體建議，
-引導用戶從「知道」走向「做到」，展開積極且有建設性的行動。
+**任務要求**：
+1. **內容精煉**：將語音紀錄內容進行結構化整理，以簡短不失原意的條列方式呈現。
+2. **思緒與情緒反映**：
+   - 辨識出使用者今天提到的關鍵事件、情緒狀態（如焦慮、興奮、迷茫等）以及當下的思考重點。
+   - 不需要過度解讀，而是以「我聽到了你今天在關注...」的方式進行反映。
+3. **保留空間**：不需要給出「具體可執行的行動建議」，而是提出 1~2 個溫和的「反向提問」或「延伸思考」，幫助使用者在接下來的思考中自行理清脈絡。
 
-請以繁體中文撰寫一份{}，語氣溫暖、直接且具有行動導向。
+請以繁體中文撰寫一份{}，語氣溫暖、平靜且具有支持性。
+
+對話紀錄內容：
+---
+{}
+---
+"""
+
+WEEKLY_PROMPT = """
+你是一位富有洞察力的心理諮商師與資深交易心理教練。
+以下是來自用戶過去一週的語音紀錄（按時間順序排列）。
+
+**定位說明**：
+這是一份「每週深度分析」。透過一整週的紀錄，我們能看見單日紀錄中看不見的「規律」與「脈絡」。
+你的任務是幫助用戶識別出其反覆出現的心理機制，並協助其打破慣性，採取行動。
+
+**任務要求**：
+1. **內容精煉**：將本週紀錄內容精煉，以簡短不失原意的條列方式呈現，幫助用戶快速回顧。
+2. **深度脈絡分析**：區分「生活」與「交易」兩個面向，指出其中的規律：
+   - **生活面**：辨識用戶的認知模式、長期的情緒趨勢與心理健康狀況。
+   - **交易面**：辨識情緒波動的規律、反覆出現的認知偏差（如確認偏誤、損失厭惡、過度自信）等、以及決策中的心理陷阱。
+3. **最重要的核心任務**：以助人者的身份，幫助用戶突破心理障礙、解開行動阻力。
+   - 根據本週的脈絡，具體指出是什麼深層心理機制阻礙了用戶採取積極行動。
+   - 提供「可立即執行」且「具體」的行動建議，引導用戶從「知道」走向「做到」。
+
+請以繁體中文撰寫一份{}，語氣堅定、溫暖、直接且具有強烈的行動導向。
 
 對話紀錄內容：
 ---
@@ -220,7 +247,8 @@ def analyze_with_gemini(content, is_weekly=False, max_retries=3):
     model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
     title = "每週交易心理與諮商總結" if is_weekly else "每日交易心理與諮商分析"
-    prompt = PROMPT.format(title, content)
+    prompt_template = WEEKLY_PROMPT if is_weekly else DAILY_PROMPT
+    prompt = prompt_template.format(title, content)
 
     _GEMINI_NETWORK_ERRORS = (
         google_exc.ServiceUnavailable,
@@ -257,7 +285,8 @@ def analyze_with_claude(content, is_weekly=False, model=None, max_retries=3):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     title = "每週交易心理與諮商總結" if is_weekly else "每日交易心理與諮商分析"
-    prompt = PROMPT.format(title, content)
+    prompt_template = WEEKLY_PROMPT if is_weekly else DAILY_PROMPT
+    prompt = prompt_template.format(title, content)
 
     last_error = None
     for attempt in range(1, max_retries + 1):
@@ -331,10 +360,11 @@ def main():
     is_saturday = (now.weekday() == 5)
 
     if args.test:
-        # 測試模式：過去 24 小時
+        # 測試模式：過去 24 小時，強制設為非週報
         end_of_period = now
         start_of_period = now - datetime.timedelta(days=1)
         analysis_type = "daily_test"
+        is_saturday = False
         print("測試模式：分析過去24小時的對話紀錄")
     elif is_saturday:
         # 週報：上週六 01:00 ～ 今天（週六）01:00，共 7 天
