@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import yaml
 import requests
@@ -332,6 +331,55 @@ def analyze_with_claude(content, is_weekly=False, model=None, max_retries=3):
     return f"Claude 分析出錯（已重試 {max_retries} 次）: {last_error}"
 
 # --- Main Logic ---
+def run_single_analysis(conn, start_of_period, end_of_period, analysis_type, is_weekly, model_key, tz_taiwan):
+    """執行單次分析（日報或週報），若無訊息則發送提示。"""
+    start_ts = int(start_of_period.timestamp())
+    end_ts = int(end_of_period.timestamp())
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT date, full_name, text FROM messages
+        WHERE chat_id = ? AND date >= ? AND date <= ?
+        ORDER BY date ASC
+    """, (TG_CHAT_ID, start_ts, end_ts))
+    messages = cursor.fetchall()
+
+    if not messages:
+        if is_weekly:
+            week_start_str = start_of_period.strftime("%Y-%m-%d")
+            week_end_str = (end_of_period - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            no_msg = f"{week_start_str} ~ {week_end_str} 無訊息"
+        else:
+            date_str = (end_of_period - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            no_msg = f"{date_str} 無訊息"
+        print(f"No messages found: {no_msg}")
+        send_message(no_msg)
+        return
+
+    label = "週報" if is_weekly else "日報"
+    print(f"Found {len(messages)} messages for {label} analysis.")
+
+    content_lines = []
+    for m_date, m_user, m_text in messages:
+        dt = datetime.datetime.fromtimestamp(m_date, tz_taiwan)
+        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        content_lines.append(f"[{time_str}] {m_user}: {m_text}")
+    formatted_content = "\n".join(content_lines)
+
+    model_id = MODEL_MAP[model_key]
+    print(f"使用模型 {model_id} 進行{label}分析...")
+    if model_key == "gemini":
+        analysis_result = analyze_with_gemini(formatted_content, is_weekly=is_weekly)
+    else:
+        analysis_result = analyze_with_claude(formatted_content, is_weekly=is_weekly, model=model_id)
+    print(f"{label}分析完成，結果長度：{len(analysis_result)} 字")
+
+    save_analysis(conn, analysis_type, model_id, analysis_result, start_ts, end_ts)
+    print(f"{label}分析結果已儲存至資料庫（模型：{model_id}，類型：{analysis_type}）")
+
+    send_message(analysis_result)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Daily Sailboat Bot")
     parser.add_argument(
@@ -357,68 +405,52 @@ def main():
     now = datetime.datetime.now(tz_taiwan)
 
     today_01 = now.replace(hour=1, minute=0, second=0, microsecond=0)
-    is_saturday = (now.weekday() == 5)
+    is_friday = (now.weekday() == 4)
 
     if args.test:
-        # 測試模式：過去 24 小時，強制設為非週報
-        end_of_period = now
-        start_of_period = now - datetime.timedelta(days=1)
-        analysis_type = "daily_test"
-        is_saturday = False
+        # 測試模式：過去 24 小時，強制日報
         print("測試模式：分析過去24小時的對話紀錄")
-    elif is_saturday:
-        # 週報：上週六 01:00 ～ 今天（週六）01:00，共 7 天
-        end_of_period = today_01
-        start_of_period = today_01 - datetime.timedelta(days=7)
-        analysis_type = "weekly"
+        run_single_analysis(
+            conn,
+            start_of_period=now - datetime.timedelta(days=1),
+            end_of_period=now,
+            analysis_type="daily_test",
+            is_weekly=False,
+            model_key=args.model,
+            tz_taiwan=tz_taiwan,
+        )
+    elif is_friday:
+        # 週五：先做日報，再做週報
+        print("週五模式：先執行日報，再執行週報")
+        run_single_analysis(
+            conn,
+            start_of_period=today_01 - datetime.timedelta(days=1),
+            end_of_period=today_01,
+            analysis_type="daily",
+            is_weekly=False,
+            model_key=args.model,
+            tz_taiwan=tz_taiwan,
+        )
+        run_single_analysis(
+            conn,
+            start_of_period=today_01 - datetime.timedelta(days=7),
+            end_of_period=today_01,
+            analysis_type="weekly",
+            is_weekly=True,
+            model_key=args.model,
+            tz_taiwan=tz_taiwan,
+        )
     else:
-        # 日報：昨天 01:00 ～ 今天 01:00
-        end_of_period = today_01
-        start_of_period = today_01 - datetime.timedelta(days=1)
-        analysis_type = "daily"
-
-    start_ts = int(start_of_period.timestamp())
-    end_ts = int(end_of_period.timestamp())
-
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT date, full_name, text FROM messages
-        WHERE chat_id = ? AND date >= ? AND date <= ?
-        ORDER BY date ASC
-    """, (TG_CHAT_ID, start_ts, end_ts))
-
-    messages = cursor.fetchall()
-
-    if not messages:
-        print("No messages found for analysis.")
-        return
-
-    print(f"Found {len(messages)} messages for {'weekly' if is_saturday else 'daily'} analysis.")
-
-    # 3. Format messages for Claude (including time)
-    content_lines = []
-    for m_date, m_user, m_text in messages:
-        dt = datetime.datetime.fromtimestamp(m_date, datetime.timezone(datetime.timedelta(hours=8)))
-        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        content_lines.append(f"[{time_str}] {m_user}: {m_text}")
-
-    formatted_content = "\n".join(content_lines)
-
-    # 4. Analyze
-    model_id = MODEL_MAP[args.model]
-    print(f"使用模型 {model_id} 進行分析...")
-    if args.model == "gemini":
-        analysis_result = analyze_with_gemini(formatted_content, is_weekly=is_saturday)
-    else:
-        analysis_result = analyze_with_claude(formatted_content, is_weekly=is_saturday, model=model_id)
-    print(f"分析完成，結果長度：{len(analysis_result)} 字")
-
-    # 5. Save analysis to database
-    save_analysis(conn, analysis_type, model_id, analysis_result, start_ts, end_ts)
-    print(f"分析結果已儲存至資料庫（模型：{model_id}，類型：{analysis_type}）")
-
-    # 6. Send back to Telegram
-    send_message(analysis_result)
+        # 其他日：日報（昨天 01:00 ～ 今天 01:00）
+        run_single_analysis(
+            conn,
+            start_of_period=today_01 - datetime.timedelta(days=1),
+            end_of_period=today_01,
+            analysis_type="daily",
+            is_weekly=False,
+            model_key=args.model,
+            tz_taiwan=tz_taiwan,
+        )
 
     conn.close()
 
