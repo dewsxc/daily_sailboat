@@ -405,7 +405,7 @@ def main():
     now = datetime.datetime.now(tz_taiwan)
 
     today_01 = now.replace(hour=1, minute=0, second=0, microsecond=0)
-    is_friday = (now.weekday() == 4)
+    is_saturday = (now.weekday() == 5)
 
     if args.test:
         # 測試模式：過去 24 小時，強制日報
@@ -419,9 +419,9 @@ def main():
             model_key=args.model,
             tz_taiwan=tz_taiwan,
         )
-    elif is_friday:
-        # 週五：先做日報，再做週報
-        print("週五模式：先執行日報，再執行週報")
+    elif is_saturday:
+        # 週六：先做日報，再做週報
+        print("週六模式：先執行日報，再執行週報")
         run_single_analysis(
             conn,
             start_of_period=today_01 - datetime.timedelta(days=1),
