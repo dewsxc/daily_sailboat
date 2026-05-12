@@ -34,8 +34,10 @@ else
     echo "secret.yml already exists. Skipping..."
 fi
 
-# 6. Setup Cronjob (Daily at 01:00 for www-data)
-echo "Setting up cronjob for www-data..."
+# 6. Setup Cronjobs for www-data
+#    - 01:00 daily: fetch + AI analysis (main job)
+#    - 00:00, 08:00, 16:00 daily: fetch-only, to avoid losing Telegram messages that expire between analyses
+echo "Setting up cronjobs for www-data..."
 # Use absolute path for the script based on where install.sh is located
 BASE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_PATH="${BASE_DIR}/bot.py"
@@ -44,8 +46,10 @@ VENV_PYTHON="${BASE_DIR}/venv/bin/python3"
 # Remove existing cronjob for this script to avoid duplicates in current user's crontab (root)
 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab - || true
 
-# Add/Update cronjob for www-data
-(sudo -u www-data crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" || true; echo "0 1 * * * cd ${BASE_DIR} && ${VENV_PYTHON} ${SCRIPT_PATH} 2>&1 | logger -t daily_sailboat_bot") | sudo -u www-data crontab -
+# Add/Update both cronjobs for www-data (clear old entries first, then add both)
+(sudo -u www-data crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" || true; \
+ echo "0 1  * * * cd ${BASE_DIR} && ${VENV_PYTHON} ${SCRIPT_PATH} 2>&1 | logger -t daily_sailboat_bot"; \
+ echo "0 */8 * * * cd ${BASE_DIR} && ${VENV_PYTHON} ${SCRIPT_PATH} --fetch-only 2>&1 | logger -t daily_sailboat_bot") | sudo -u www-data crontab -
 
 echo "--------------------------------------------------"
 echo "Installation completed successfully!"

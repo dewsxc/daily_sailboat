@@ -393,12 +393,22 @@ def main():
         default=DEFAULT_MODEL,
         help=f"選擇 AI 模型（預設：{DEFAULT_MODEL}）。選項：{', '.join(f'{k}={v}' for k, v in MODEL_MAP.items())}"
     )
+    parser.add_argument(
+        "--fetch-only",
+        action="store_true",
+        help="僅抓取 Telegram 訊息並儲存，不進行 AI 分析（每12小時執行以避免訊息失效丟失）"
+    )
     args = parser.parse_args()
 
     conn = init_db()
 
     # 1. Fetch and store new messages
     fetch_updates(conn)
+
+    if args.fetch_only:
+        print("僅抓取模式完成，跳過 AI 分析。")
+        conn.close()
+        return
 
     # 2. Determine timeframe (UTC+8)
     tz_taiwan = datetime.timezone(datetime.timedelta(hours=8))
